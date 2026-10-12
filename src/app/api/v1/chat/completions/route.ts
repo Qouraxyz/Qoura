@@ -38,28 +38,36 @@ const FORWARDED = new Set([
 ]);
 
 /*
- * Messages must be priced by the bytes the gateway can see: text parts, and images only as inline
- * data URLs (a remote image URL is billed by the supplier per picture, outside the byte estimate).
- * Audio, files and other part types are refused.
+ * Messages must be priceable before the call: text parts, and images only as inline data URLs, each
+ * held for IMAGE_TOKENS whatever its byte size (suppliers bill images by resolution, and resize them
+ * to a bounded tile count). Remote image URLs, audio, files and other part types are refused.
  */
-function messagesPriceable(messages: unknown[]) {
+const MAX_IMAGES = 8;
+const IMAGE_TOKENS = 8_000;
+
+/** Number of inline images, or -1 when the messages hold something the hold cannot price. */
+function priceableImages(messages: unknown[]) {
+  let images = 0;
   for (const m of messages) {
-    if (!m || typeof m !== "object") return false;
+    if (!m || typeof m !== "object") return -1;
     const { role, content } = m as { role?: unknown; content?: unknown };
-    if (typeof role !== "string" || !["system", "user", "assistant", "tool", "developer"].includes(role)) return false;
+    if (typeof role !== "string" || !["system", "user", "assistant", "tool", "developer"].includes(role)) return -1;
     if (content === null || content === undefined || typeof content === "string") continue;
-    if (!Array.isArray(content)) return false;
+    if (!Array.isArray(content)) return -1;
     for (const part of content) {
       const t = (part as { type?: unknown })?.type;
       if (t === "text") continue;
       if (t === "image_url") {
         const url = (part as { image_url?: { url?: unknown } }).image_url?.url;
-        if (typeof url === "string" && url.startsWith("data:image/")) continue;
+        if (typeof url === "string" && url.startsWith("data:image/")) {
+          images++;
+          continue;
+        }
       }
-      return false;
+      return -1;
     }
   }
-  return true;
+  return images <= MAX_IMAGES ? images : -1;
 }
 
 type Body = { model?: unknown; messages?: unknown; max_tokens?: unknown; max_completion_tokens?: unknown; stream?: unknown; [k: string]: unknown };
@@ -82,8 +90,9 @@ export async function POST(request: Request) {
   if (typeof body.model !== "string" || !Array.isArray(body.messages) || body.messages.length === 0) {
     return fail({ status: 400, message: "Send model and a non-empty messages array.", type: "invalid_request_error", code: "bad_request" });
   }
-  if (!messagesPriceable(body.messages)) {
-    return fail({ status: 400, message: "Messages may hold text and inline (data URL) images only.", type: "invalid_request_error", code: "unsupported_content" });
+  const images = priceableImages(body.messages);
+  if (images < 0) {
+    return fail({ status: 400, message: `Messages may hold text and up to ${MAX_IMAGES} inline (data URL) images.`, type: "invalid_request_error", code: "unsupported_content" });
   }
   const model = await resolveModel(body.model);
   if (!model || (model.item.category !== "models" && model.item.slug !== "web-answer")) return fail(errors.unknownModel);
@@ -93,7 +102,7 @@ export async function POST(request: Request) {
   const asked = Number(body.max_tokens ?? body.max_completion_tokens ?? DEFAULT_MAX_TOKENS);
   const maxTokens = Number.isInteger(asked) && asked > 0 ? Math.min(asked, 32_768) : DEFAULT_MAX_TOKENS;
   // Input estimate: one token per two bytes of request is above any real tokenizer's count.
-  const worstUsd = (text.length / 2) * model.inUsd + maxTokens * model.outUsd + (web ? WEB_RESULTS * WEB_RESULT_USD : 0);
+  const worstUsd = (text.length / 2 + images * IMAGE_TOKENS) * model.inUsd + maxTokens * model.outUsd + (web ? WEB_RESULTS * WEB_RESULT_USD : 0);
   const held = Math.ceil(worstUsd * 1.25 * 1_000_000) + 1;
   if (!(await hold(store, who.binding, held))) return fail(errors.broke);
 
@@ -134,7 +143,8 @@ export async function POST(request: Request) {
       await settle(store, who.binding, held, 0, { model: model.item.slug, failed: true });
       return fail(errors.supplierDown);
     }
-    const cost = Number(json.usage?.cost ?? (json.usage?.prompt_tokens ?? 0) * model.inUsd + (json.usage?.completion_tokens ?? 0) * model.outUsd);
+    // No usage report means no way to price the call: it keeps the whole hold.
+    const cost = json.usage ? Number(json.usage.cost ?? (json.usage.prompt_tokens ?? 0) * model.inUsd + (json.usage.completion_tokens ?? 0) * model.outUsd) : held / 1_000_000 / MARKUP;
     const charge = await settle(store, who.binding, held, cost, { model: model.item.slug, in: json.usage?.prompt_tokens ?? 0, out: json.usage?.completion_tokens ?? 0 });
     json.model = model.item.slug;
     return NextResponse.json(json, { headers: { "x-charge-usd": (charge / 1_000_000).toFixed(6) } });
@@ -150,7 +160,7 @@ export async function POST(request: Request) {
       const { done, value } = await reader.read();
       if (done) {
         const cost = Number(usage?.cost ?? (usage?.prompt_tokens ?? 0) * model.inUsd + (usage?.completion_tokens ?? 0) * model.outUsd);
-        await settle(store, who.binding, held, usage ? cost : model.outUsd * maxTokens, {
+        await settle(store, who.binding, held, usage ? cost : held / 1_000_000 / MARKUP, {
           model: model.item.slug,
           in: usage?.prompt_tokens ?? 0,
           out: usage?.completion_tokens ?? 0,
