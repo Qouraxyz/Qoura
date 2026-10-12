@@ -35,8 +35,32 @@ const FORWARDED = new Set([
   "parallel_tool_calls",
   "logprobs",
   "top_logprobs",
-  "reasoning",
 ]);
+
+/*
+ * Messages must be priced by the bytes the gateway can see: text parts, and images only as inline
+ * data URLs (a remote image URL is billed by the supplier per picture, outside the byte estimate).
+ * Audio, files and other part types are refused.
+ */
+function messagesPriceable(messages: unknown[]) {
+  for (const m of messages) {
+    if (!m || typeof m !== "object") return false;
+    const { role, content } = m as { role?: unknown; content?: unknown };
+    if (typeof role !== "string" || !["system", "user", "assistant", "tool", "developer"].includes(role)) return false;
+    if (content === null || content === undefined || typeof content === "string") continue;
+    if (!Array.isArray(content)) return false;
+    for (const part of content) {
+      const t = (part as { type?: unknown })?.type;
+      if (t === "text") continue;
+      if (t === "image_url") {
+        const url = (part as { image_url?: { url?: unknown } }).image_url?.url;
+        if (typeof url === "string" && url.startsWith("data:image/")) continue;
+      }
+      return false;
+    }
+  }
+  return true;
+}
 
 type Body = { model?: unknown; messages?: unknown; max_tokens?: unknown; max_completion_tokens?: unknown; stream?: unknown; [k: string]: unknown };
 
@@ -58,6 +82,9 @@ export async function POST(request: Request) {
   if (typeof body.model !== "string" || !Array.isArray(body.messages) || body.messages.length === 0) {
     return fail({ status: 400, message: "Send model and a non-empty messages array.", type: "invalid_request_error", code: "bad_request" });
   }
+  if (!messagesPriceable(body.messages)) {
+    return fail({ status: 400, message: "Messages may hold text and inline (data URL) images only.", type: "invalid_request_error", code: "unsupported_content" });
+  }
   const model = await resolveModel(body.model);
   if (!model || (model.item.category !== "models" && model.item.slug !== "web-answer")) return fail(errors.unknownModel);
   if (!(await underCeiling(store))) return fail(errors.busy);
@@ -72,7 +99,7 @@ export async function POST(request: Request) {
 
   const stream = body.stream === true;
   // Only fields that cannot raise the cost past the hold are forwarded: no n, no fallback models,
-  // no provider routing or plugins from the caller.
+  // no provider routing, plugins or reasoning budgets from the caller.
   const passed = Object.fromEntries(Object.entries(body).filter(([k]) => FORWARDED.has(k)));
   const upstreamBody = {
     ...passed,
