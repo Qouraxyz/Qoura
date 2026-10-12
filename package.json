@@ -1,0 +1,46 @@
+{
+  "name": "qoura",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev -p 5010",
+    "prebuild": "node scripts/build-prover.mjs",
+    "build": "next build",
+    "start": "next start -p 5010",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/lib/credit/*.test.ts src/lib/*.test.ts src/lib/auth/*.test.ts src/lib/server/*.test.ts scripts/*.test.mjs",
+    "contracts:artifacts": "node scripts/contracts-artifacts.mjs",
+    "verify-deployment": "node scripts/verify-deployment.mjs",
+    "zk:selftest": "tsx scripts/redeem-selftest.mts"
+  },
+  "dependencies": {
+    "@aztec/bb.js": "5.0.0-nightly.20260522",
+    "@noble/ciphers": "^2.4.0",
+    "@noble/curves": "^2.4.0",
+    "@noble/hashes": "^2.4.0",
+    "@noir-lang/acvm_js": "1.0.0-beta.22",
+    "@noir-lang/noir_js": "1.0.0-beta.22",
+    "@noir-lang/noirc_abi": "1.0.0-beta.22",
+    "@walletconnect/ethereum-provider": "^2.25.0",
+    "lucide-react": "^1.47.0",
+    "next": "16.3.5",
+    "poseidon-lite": "0.3.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "redis": "^6.3.0"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "esbuild": "^0.28.2",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.5",
+    "sharp": "^0.34.0",
+    "tailwindcss": "^4",
+    "tsx": "^4.20.0",
+    "typescript": "^5"
+  }
+}
